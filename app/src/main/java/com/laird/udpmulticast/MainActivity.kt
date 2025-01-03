@@ -43,6 +43,10 @@ import java.net.SocketException
 import java.text.SimpleDateFormat
 import java.util.*
 import androidx.compose.material.icons.filled.Clear
+import androidx.compose.material.icons.filled.Delete
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.isActive
 
 private val Context.dataStore by preferencesDataStore(name = "settings")
 
@@ -131,6 +135,9 @@ fun MulticastScreen(modifier: Modifier = Modifier, context: Context) {
         }
     }
 
+    // 添加一个Job引用来控制接收消息的协程
+    val receiveJob = remember { mutableStateOf<Job?>(null) }
+
     Column(
         modifier = modifier.padding(16.dp),
         verticalArrangement = Arrangement.spacedBy(8.dp)
@@ -191,9 +198,14 @@ fun MulticastScreen(modifier: Modifier = Modifier, context: Context) {
                         scope.launch {
                             try {
                                 multicastLock.acquire()
-                                socketRef.value = startMulticastListener(address, port.toInt()) { message ->
-                                    messages = messages + message
-                                }
+                                socketRef.value = startMulticastListener(
+                                    address, 
+                                    port.toInt(),
+                                    receiveJob,
+                                    onMessageReceived = { message ->
+                                        messages = messages + message
+                                    }
+                                )
                             } catch (e: Exception) {
                                 Log.e("Multicast", "加入组播失败: ${e.message}")
                                 Toast.makeText(context, "加入组播失败: ${e.message}", Toast.LENGTH_SHORT).show()
@@ -212,6 +224,10 @@ fun MulticastScreen(modifier: Modifier = Modifier, context: Context) {
             Button(
                 onClick = {
                     scope.launch {
+                        // 首先取消接收消息的协程
+                        receiveJob.value?.cancel()
+                        receiveJob.value = null
+                        
                         socketRef.value?.let { socket ->
                             withContext(Dispatchers.IO) {
                                 try {
@@ -239,7 +255,7 @@ fun MulticastScreen(modifier: Modifier = Modifier, context: Context) {
                 enabled = messages.isNotEmpty()
             ) {
                 Icon(
-                    imageVector = Icons.Default.Clear,
+                    imageVector = Icons.Default.Delete,
                     contentDescription = "清除消息",
                     tint = if (messages.isNotEmpty()) 
                         MaterialTheme.colorScheme.error 
@@ -341,6 +357,7 @@ fun MulticastScreen(modifier: Modifier = Modifier, context: Context) {
 private suspend fun startMulticastListener(
     address: String,
     port: Int,
+    receiveJob: MutableState<Job?>,
     onMessageReceived: (String) -> Unit
 ): MulticastSocket {
     return withContext(Dispatchers.IO) {
@@ -389,9 +406,10 @@ private suspend fun startMulticastListener(
             socket.joinGroup(InetSocketAddress(group, port), socket.networkInterface)
             Log.d("Multicast", "成功加入组播组: $address:$port")
             
-            launch {
-                val buffer = ByteArray(4096)  // 增大缓冲区
-                while (true) {
+            // 返回启动的协程Job，以便后续可以取消
+            val job = launch {
+                val buffer = ByteArray(4096)
+                while (isActive) {  // 使用isActive检查协程是否被取消
                     try {
                         val packet = DatagramPacket(buffer, buffer.size)
                         Log.d("Multicast", "等待接收数据...")
@@ -413,6 +431,7 @@ private suspend fun startMulticastListener(
                 }
             }
             
+            receiveJob.value = job  // 保存Job引用
             socket
         } catch (e: Exception) {
             Log.e("Multicast", "初始化组播失败: ${e.message}")
